@@ -2,6 +2,7 @@ package com.github.claudecodegui.handler;
 
 import com.github.claudecodegui.permission.PermissionRequest;
 import com.github.claudecodegui.permission.PermissionService;
+import com.github.claudecodegui.notifications.ManualActionNotifier;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.application.ApplicationManager;
@@ -94,6 +95,13 @@ public class PermissionHandler extends BaseMessageHandler {
         pendingPermissionRequests.put(channelId, future);
         LOG.info("[PERM_SHOW] Stored pending request, total pending: " + pendingPermissionRequests.size());
 
+        ManualActionNotifier.notifyOnce(
+                context.getProject(),
+                "permission:" + channelId,
+                "Action required",
+                "Permission approval required for: " + toolName
+        );
+
         try {
             Gson gson = new Gson();
             JsonObject requestData = new JsonObject();
@@ -125,6 +133,7 @@ public class PermissionHandler extends BaseMessageHandler {
                     LOG.warn("[PERM_SHOW] Timeout! Removing pending request for channelId=" + channelId);
                     pendingPermissionRequests.remove(channelId);
                     future.complete(PermissionService.PermissionResponse.DENY.getValue());
+                    updateAttentionState();
                 }
             });
 
@@ -132,6 +141,7 @@ public class PermissionHandler extends BaseMessageHandler {
             LOG.error("[PERM_SHOW] ERROR: " + e.getMessage(), e);
             pendingPermissionRequests.remove(channelId);
             future.complete(PermissionService.PermissionResponse.DENY.getValue());
+            updateAttentionState();
         }
 
         return future;
@@ -190,6 +200,13 @@ public class PermissionHandler extends BaseMessageHandler {
 
             targetWindow.executeJavaScriptCode(jsCode);
 
+            ManualActionNotifier.notifyOnce(
+                targetProject,
+                "permissionRequest:" + request.getChannelId(),
+                "Action required",
+                "Permission approval required for: " + request.getToolName()
+            );
+
         } catch (Exception e) {
             LOG.error("[PermissionHandler] 显示权限弹窗失败: " + e.getMessage(), e);
             this.context.getSession().handlePermissionDecision(
@@ -199,6 +216,7 @@ public class PermissionHandler extends BaseMessageHandler {
                 "Failed to show permission dialog: " + e.getMessage()
             );
             notifyPermissionDenied();
+            updateAttentionState();
         }
     }
 
@@ -241,6 +259,7 @@ public class PermissionHandler extends BaseMessageHandler {
                 if (!allow) {
                     notifyPermissionDenied();
                 }
+                updateAttentionState();
             } else {
                 LOG.warn("[PERM_DECISION] No pending future found for channelId=" + channelId + ", falling back to session handler");
                 LOG.warn("[PERM_DECISION] Current pendingPermissionRequests keys: " + pendingPermissionRequests.keySet());
@@ -253,6 +272,7 @@ public class PermissionHandler extends BaseMessageHandler {
                 if (!allow) {
                     notifyPermissionDenied();
                 }
+                updateAttentionState();
             }
         } catch (Exception e) {
             LOG.error("[PERM_DECISION] ERROR: " + e.getMessage(), e);
@@ -265,6 +285,22 @@ public class PermissionHandler extends BaseMessageHandler {
     private void notifyPermissionDenied() {
         if (deniedCallback != null) {
             deniedCallback.onPermissionDenied();
+        }
+    }
+
+    private void updateAttentionState() {
+        Project project = context.getProject();
+        if (project == null || project.isDisposed()) return;
+
+        boolean hasPending =
+            !pendingPermissionRequests.isEmpty() ||
+            !pendingAskUserQuestionRequests.isEmpty() ||
+            !pendingPlanApprovalRequests.isEmpty();
+
+        if (!hasPending) {
+            ManualActionNotifier.cancelAttention(project);
+        } else {
+            ManualActionNotifier.requestAttentionIfBackground(project);
         }
     }
 
@@ -302,6 +338,7 @@ public class PermissionHandler extends BaseMessageHandler {
 
         LOG.info("[PERM_CLEAR] Cleared: " + permissionCount + " permission, " +
                  askUserCount + " askUser, " + planCount + " plan requests");
+        updateAttentionState();
     }
 
     /**
@@ -315,6 +352,13 @@ public class PermissionHandler extends BaseMessageHandler {
         LOG.debug("[ASK_USER_QUESTION][SHOW_DIALOG] questionsData=" + questionsData.toString());
 
         pendingAskUserQuestionRequests.put(requestId, future);
+
+        ManualActionNotifier.notifyOnce(
+            context.getProject(),
+            "askUser:" + requestId,
+            "Action required",
+            "Claude needs your input to continue."
+        );
 
         try {
             Gson gson = new Gson();
@@ -341,6 +385,7 @@ public class PermissionHandler extends BaseMessageHandler {
                     pendingAskUserQuestionRequests.remove(requestId);
                     // 超时返回空答案
                     future.complete(new JsonObject());
+                    updateAttentionState();
                 }
             });
 
@@ -348,6 +393,7 @@ public class PermissionHandler extends BaseMessageHandler {
             LOG.error("[ASK_USER_QUESTION][SHOW_DIALOG] ERROR: " + e.getMessage(), e);
             pendingAskUserQuestionRequests.remove(requestId);
             future.complete(new JsonObject());
+            updateAttentionState();
         }
 
         return future;
@@ -375,6 +421,7 @@ public class PermissionHandler extends BaseMessageHandler {
             } else {
                 LOG.warn("[ASK_USER_QUESTION][HANDLE_RESPONSE] No pending request found for requestId: " + requestId);
             }
+            updateAttentionState();
         } catch (Exception e) {
             LOG.error("[ASK_USER_QUESTION][HANDLE_RESPONSE] ERROR: " + e.getMessage(), e);
         }
@@ -391,6 +438,13 @@ public class PermissionHandler extends BaseMessageHandler {
         LOG.debug("[PLAN_APPROVAL][SHOW_DIALOG] planData=" + planData.toString());
 
         pendingPlanApprovalRequests.put(requestId, future);
+
+        ManualActionNotifier.notifyOnce(
+            context.getProject(),
+            "plan:" + requestId,
+            "Action required",
+            "Plan approval required. Review and approve to continue."
+        );
 
         try {
             Gson gson = new Gson();
@@ -421,6 +475,7 @@ public class PermissionHandler extends BaseMessageHandler {
                     timeoutResponse.addProperty("targetMode", "default");
                     timeoutResponse.addProperty("message", "Plan approval timed out");
                     future.complete(timeoutResponse);
+                    updateAttentionState();
                 }
             });
 
@@ -432,6 +487,7 @@ public class PermissionHandler extends BaseMessageHandler {
             errorResponse.addProperty("targetMode", "default");
             errorResponse.addProperty("message", "Error showing plan approval dialog");
             future.complete(errorResponse);
+            updateAttentionState();
         }
 
         return future;
@@ -461,6 +517,7 @@ public class PermissionHandler extends BaseMessageHandler {
             } else {
                 LOG.warn("[PLAN_APPROVAL][HANDLE_RESPONSE] No pending request found for requestId: " + requestId);
             }
+            updateAttentionState();
         } catch (Exception e) {
             LOG.error("[PLAN_APPROVAL][HANDLE_RESPONSE] ERROR: " + e.getMessage(), e);
         }
